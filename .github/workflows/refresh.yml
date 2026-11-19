@@ -1,0 +1,62 @@
+name: Refresh database
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: write # publishes the database as a release asset
+
+env:
+  DB_TAG: db
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          java-version: 25
+          distribution: temurin
+
+      - uses: gradle/actions/setup-gradle@v5
+
+      - uses: astral-sh/setup-uv@v7
+
+      # The database is the only state between runs: the blob cache in it means old build files are never re-evaluated.
+      - name: Download previous database
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p data
+          if gh release download "$DB_TAG" --pattern linker.db.gz --dir data; then
+            gunzip data/linker.db.gz
+          else
+            echo "No previous database: this run does the full backfill."
+            uv run keiex add-origin
+          fi
+
+      # ANDROID_HOME is preinstalled on ubuntu runners, so no --sdk-properties is needed.
+      # Download counts go through Grafana's datasource API; without the secret, the public panel is used.
+      - name: Refresh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GRAFANA_TOKEN: ${{ secrets.GRAFANA_TOKEN }}
+        run: uv run keiex all
+
+      - name: Publish database
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sqlite3 data/linker.db "PRAGMA wal_checkpoint(TRUNCATE); VACUUM;"
+          gzip -9 -k data/linker.db
+          gh release view "$DB_TAG" >/dev/null 2>&1 || gh release create "$DB_TAG" --title "Linker database" --notes "Refreshed by the Refresh database workflow."
+          gh release upload "$DB_TAG" data/linker.db.gz --clobber

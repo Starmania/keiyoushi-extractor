@@ -1,0 +1,52 @@
+// Dumps the evaluated `keiyoushi {}` metadata of every configured project as JSON lines.
+// Groovy rather than Kotlin DSL: the build-logic classes are not on the init script's
+// compile classpath, so they are read through dynamic dispatch.
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+
+// Init scripts also apply to the included build-logic build; only the root build is dumped.
+if (gradle.parent != null) return
+
+gradle.projectsEvaluated { g ->
+    def outPath = g.startParameter.projectProperties["keidumpOut"]
+    if (outPath == null) throw new GradleException("-PkeidumpOut=<file> is required")
+    def root = g.rootProject.rootDir.toPath()
+    def lines = []
+
+    g.rootProject.allprojects { p ->
+        def kei = p.extensions.findByName("keiyoushi")
+        if (kei == null) return
+        def path = root.relativize(p.projectDir.toPath()).toString().replace('\\', '/')
+        def deeplinks = kei.deeplinks.get().collect { [hosts: it.hosts.get(), paths: it.pathPatterns.get()] }
+
+        if (path.startsWith("lib-multisrc/")) {
+            lines << [
+                kind: "theme",
+                path: path,
+                baseVersionCode: kei.baseVersionCode.orNull,
+                libVersion: kei.libVersion.orNull,
+                deeplinks: deeplinks,
+            ]
+            return
+        }
+
+        // The plugin hands its own resolved sources (ids, base urls, mirrors) to KSP.
+        def keiSources = p.extensions.getByName("ksp").arguments["kei_sources"]
+        lines << [
+            kind: "src",
+            path: path,
+            name: kei.name.orNull,
+            theme: kei.theme.orNull,
+            pkgName: kei.pkgName.orNull,
+            versionCode: kei.versionCode.orNull,
+            libVersion: kei.libVersion.orNull,
+            contentWarning: kei.contentWarning.orNull?.name(),
+            deeplinks: deeplinks,
+            sources: keiSources == null ? [] : new JsonSlurper().parseText(keiSources),
+        ]
+    }
+
+    new File(outPath).withWriter("UTF-8") { w ->
+        lines.each { w.write(JsonOutput.toJson(it)); w.write("\n") }
+    }
+}
