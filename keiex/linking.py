@@ -3,6 +3,7 @@
 import logging
 import sqlite3
 from collections import defaultdict
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 
 from markdown_it import MarkdownIt
@@ -10,6 +11,12 @@ from markdown_it import MarkdownIt
 log = logging.getLogger(__name__)
 
 md = MarkdownIt("commonmark", {"linkify": True}).enable("linkify")
+
+# A host still counts for issues opened this long after a folder stopped declaring it.
+DOMAIN_GRACE = timedelta(days=30)
+# Leading-word title matches: names are at most this many words, and shorter ones are too ambiguous.
+MAX_NAME_WORDS = 5
+MIN_LEADING_NAME = 4
 
 # PRs touching more folders than this are sweeping migrations, not fixes for the issues they close.
 MAX_PR_FOLDERS = 3
@@ -21,6 +28,11 @@ LANGUAGE_NAMES = {
     "korean": "ko", "chinese": "zh", "vietnamese": "vi", "thai": "th", "german": "de",
     "italian": "it", "polish": "pl", "ukrainian": "uk", "multi": "all", "all": "all",
 }
+
+
+def utc(iso: str) -> str:
+    """Commit dates carry offsets and GitHub dates end in Z; both compare once in UTC."""
+    return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(UTC).isoformat()
 
 
 def normalize(name: str) -> str:
@@ -69,13 +81,19 @@ def title_names(title: str) -> tuple[list[str], list[str]]:
     "[Asura Scans] ..." -> (["Asura Scans"], []); "(Mangabox) Mangakakalot: ..." -> (["Mangabox"], ["Mangakakalot"]).
     Leading groups often name the theme rather than the extension.
     """
+    groups, t = leading_groups(title)
+    names = [t.split(sep, 1)[0] for sep in (":", " - ", " | ") if sep in t]
+    return groups, names
+
+
+def leading_groups(title: str) -> tuple[list[str], str]:
+    """"(Mangabox) [EN] Mangakakalot: ..." -> (["Mangabox", "EN"], "Mangakakalot: ...")."""
     t = title.strip()
     groups = []
     while t[:1] in ("[", "(") and (end := t.find("]" if t[0] == "[" else ")")) > 0:
         groups.append(t[1:end])
         t = t[end + 1:].lstrip()
-    names = [t.split(sep, 1)[0] for sep in (":", " - ", " | ") if sep in t]
-    return groups, names
+    return groups, t
 
 
 class Index:
@@ -93,9 +111,16 @@ class Index:
         for r in conn.execute("SELECT path, name, lang FROM source WHERE origin = ?", (origin,)):
             self.by_name[normalize(r["name"])].add(r["path"])
             self.lang[r["path"]].add(r["lang"])
-        self.by_host: dict[str, set[str]] = defaultdict(set)
-        for r in conn.execute("SELECT DISTINCT path, host FROM domain_usage WHERE origin = ?", (origin,)):
-            self.by_host[r["host"]].add(r["path"])
+        # host -> [(path, declared from, declared until or None)]
+        self.by_host: dict[str, list[tuple[str, str, str | None]]] = defaultdict(list)
+        for r in conn.execute(
+            """SELECT du.path, du.host, f.date AS since, t.date AS until FROM domain_usage du
+               JOIN git_commit f ON f.origin = du.origin AND f.sha = du.from_sha
+               LEFT JOIN git_commit t ON t.origin = du.origin AND t.sha = du.to_sha
+               WHERE du.origin = ?""",
+            (origin,),
+        ):
+            self.by_host[r["host"]].append((r["path"], utc(r["since"]), utc(r["until"]) if r["until"] else None))
 
     def match_name(self, text: str, language: str | None, exact: bool = False) -> set[str]:
         """Longest matching prefix of `text`, or only the whole of it (versions dropped) when `exact`."""
@@ -107,8 +132,25 @@ class Index:
                 return narrowed or paths
         return set()
 
-    def match_host(self, host: str) -> set[str]:
-        return self.by_host.get(host) or self.by_host.get(host.removeprefix("www.")) or self.by_host.get("www." + host, set())
+    def match_host(self, host: str, when: str) -> set[str]:
+        """Folders that declared `host` when the issue was opened (or shortly before: domain changes get reported late)."""
+        uses = self.by_host.get(host) or self.by_host.get(host.removeprefix("www.")) or self.by_host.get("www." + host, [])
+        when_dt = datetime.fromisoformat(when)
+        return {
+            path for path, since, until in uses
+            if until is None or datetime.fromisoformat(until) + DOMAIN_GRACE >= when_dt
+        }
+
+    def match_leading_words(self, title: str) -> set[str]:
+        """Titles like "mangadex not working": the longest run of leading words that is exactly a known name."""
+        groups, rest = leading_groups(title)
+        # "[Yupmanga] is broken": a lone leading group is the name itself.
+        words = (rest if rest else " ".join(groups)).split()
+        for k in range(min(len(words), MAX_NAME_WORDS), 0, -1):
+            cand = normalize(" ".join(words[:k]))
+            if len(cand) >= MIN_LEADING_NAME and (paths := self.by_name.get(cand)):
+                return paths
+        return set()
 
 
 def link_issues(conn: sqlite3.Connection, origin: str) -> None:
@@ -127,7 +169,7 @@ def link_issues(conn: sqlite3.Connection, origin: str) -> None:
             key = (issue, p, method)
             links[key] = max(links.get(key, 0), confidence)
 
-    for issue in conn.execute("SELECT number, title, body FROM issue WHERE origin = ?", (origin,)):
+    for issue in conn.execute("SELECT number, title, body, created_at FROM issue WHERE origin = ?", (origin,)):
         n = issue["number"]
         for pr in closing[n]:
             folders = pr_folders.get(pr, [])
@@ -135,7 +177,7 @@ def link_issues(conn: sqlite3.Connection, origin: str) -> None:
                 add(n, folders, "closing-pr", 1.0 if len(folders) == 1 else 0.8)
 
         for host in body_hosts(issue["body"]):
-            paths = index.match_host(host)
+            paths = index.match_host(host, utc(issue["created_at"]))
             add(n, paths, "domain", 0.9 if len(paths) == 1 else 0.6)
 
         sections = form_sections(issue["body"])
@@ -154,6 +196,9 @@ def link_issues(conn: sqlite3.Connection, origin: str) -> None:
             paths = index.match_name(name, None, exact=True)
             if 0 < len(paths) <= MAX_PR_FOLDERS:
                 add(n, paths, "title-name", 0.6)
+        paths = index.match_leading_words(issue["title"])
+        if 0 < len(paths) <= MAX_PR_FOLDERS:
+            add(n, paths, "title-name", 0.5)
 
     conn.execute("DELETE FROM issue_link WHERE origin = ?", (origin,))
     conn.executemany(
