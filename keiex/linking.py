@@ -63,16 +63,19 @@ def body_hosts(body: str) -> set[str]:
     return hosts
 
 
-def title_names(title: str) -> list[str]:
-    """Names reporters put up front: "[Asura Scans] ...", "Asura Scans: ...", "Asura Scans - ..."."""
+def title_names(title: str) -> tuple[list[str], list[str]]:
+    """Names reporters put up front, as (leading groups, name before a separator).
+
+    "[Asura Scans] ..." -> (["Asura Scans"], []); "(Mangabox) Mangakakalot: ..." -> (["Mangabox"], ["Mangakakalot"]).
+    Leading groups often name the theme rather than the extension.
+    """
     t = title.strip()
-    found = []
-    if t.startswith("[") and "]" in t:
-        found.append(t[1:t.index("]")])
-    for sep in (":", " - ", " | "):
-        if sep in t:
-            found.append(t.split(sep, 1)[0])
-    return found
+    groups = []
+    while t[:1] in ("[", "(") and (end := t.find("]" if t[0] == "[" else ")")) > 0:
+        groups.append(t[1:end])
+        t = t[end + 1:].lstrip()
+    names = [t.split(sep, 1)[0] for sep in (":", " - ", " | ") if sep in t]
+    return groups, names
 
 
 class Index:
@@ -83,6 +86,10 @@ class Index:
             for n in (r["name"], r["module"]):
                 self.by_name[normalize(n)].add(r["path"])
             self.lang[r["path"]].add(r["lang"])
+        self.themes = {
+            normalize(r["module"]): r["path"]
+            for r in conn.execute("SELECT path, module FROM extension WHERE origin = ? AND kind = 'theme'", (origin,))
+        }
         for r in conn.execute("SELECT path, name, lang FROM source WHERE origin = ?", (origin,)):
             self.by_name[normalize(r["name"])].add(r["path"])
             self.lang[r["path"]].add(r["lang"])
@@ -90,8 +97,10 @@ class Index:
         for r in conn.execute("SELECT DISTINCT path, host FROM domain_usage WHERE origin = ?", (origin,)):
             self.by_host[r["host"]].add(r["path"])
 
-    def match_name(self, text: str, language: str | None) -> set[str]:
-        for cand in name_candidates(text):
+    def match_name(self, text: str, language: str | None, exact: bool = False) -> set[str]:
+        """Longest matching prefix of `text`, or only the whole of it (versions dropped) when `exact`."""
+        candidates = name_candidates(text)
+        for cand in candidates[:1] if exact else candidates:
             if paths := self.by_name.get(cand):
                 code = LANGUAGE_NAMES.get((language or "").strip().casefold())
                 narrowed = {p for p in paths if code and (code in self.lang[p] or "all" in self.lang[p])}
@@ -134,8 +143,15 @@ def link_issues(conn: sqlite3.Connection, origin: str) -> None:
             paths = index.match_name(info, sections.get("source language"))
             add(n, paths, "form-name", 0.85 if len(paths) == 1 else 0.5)
 
-        for name in title_names(issue["title"]):
-            paths = index.match_name(name, None)
+        # Titles are free text, so only whole-name matches count.
+        groups, names = title_names(issue["title"])
+        for group in groups:
+            theme = index.themes.get(normalize(group))
+            paths = {theme} if theme else index.match_name(group, None, exact=True)
+            if 0 < len(paths) <= MAX_PR_FOLDERS:
+                add(n, paths, "title-name", 0.6)
+        for name in names:
+            paths = index.match_name(name, None, exact=True)
             if 0 < len(paths) <= MAX_PR_FOLDERS:
                 add(n, paths, "title-name", 0.6)
 

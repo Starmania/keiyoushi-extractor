@@ -53,5 +53,6 @@ def test_body_hosts_includes_bare_domains():
 
 
 def test_title_names():
-    assert title_names("[Asura Scans] chapters fail") == ["Asura Scans"]
-    assert "Blue Solo" in title_names("Blue Solo: no images")
+    assert title_names("[Asura Scans] chapters fail") == (["Asura Scans"], [])
+    assert title_names("Blue Solo: no images") == ([], ["Blue Solo"])
+    assert title_names("(Mangabox) Mangakakalot: Website redesign") == (["Mangabox"], ["Mangakakalot"])
