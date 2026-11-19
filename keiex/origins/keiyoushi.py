@@ -305,9 +305,28 @@ class KeiyoushiOrigin:
         for v in versions:
             by_path[v["path"]].append(v)
 
+        self._head = self.repo.rev_parse(f"origin/{self.branch}")
+        self._head_files = set(self.repo.tree_entries(self._head, "src", "lib-multisrc", "core/src/main/res"))
         for path, history in by_path.items():
             self._derive_folder(path, history)
         self.conn.commit()
+
+    def _icon_url(self, path: str, theme: str | None, removed_sha: str | None) -> str | None:
+        """The extension's own launcher icon, else its theme's, else the default one (as the published index does).
+
+        A removed extension's files are gone from the branch, so its icon is pinned to the commit before removal.
+        """
+        candidates = [path] + ([f"lib-multisrc/{theme}"] if theme else []) + ["core/src/main"]
+        if removed_sha:
+            rev = self.repo.rev_parse(f"{removed_sha}^")
+            files = set(self.repo.tree_entries(rev, *candidates))
+        else:
+            rev, files = self.branch, self._head_files
+        for folder in candidates:
+            icon = f"{folder}/res/mipmap-xhdpi/ic_launcher.png"
+            if icon in files:
+                return f"https://cdn.jsdelivr.net/gh/{self.origin}@{rev}/{icon}"
+        return None
 
     def _derive_folder(self, path: str, history: list[sqlite3.Row]) -> None:
         o = self.origin
@@ -326,7 +345,7 @@ class KeiyoushiOrigin:
                 o, path, kind, lang, module, meta.get("name") or module, pkg, meta.get("theme"),
                 meta.get("contentWarning"), meta.get("libVersion"),
                 meta.get("versionCode") if kind == "src" else meta.get("baseVersionCode"),
-                f"https://cdn.jsdelivr.net/gh/{o}@{self.branch}/{path}/res/mipmap-xhdpi/ic_launcher.png" if kind == "src" else None,
+                self._icon_url(path, meta.get("theme"), last["sha"] if last["blob"] is None else None) if kind == "src" else None,
                 history[0]["sha"], last["sha"], last["sha"] if last["blob"] is None else None,
             ),
         )
