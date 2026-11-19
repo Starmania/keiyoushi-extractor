@@ -9,7 +9,22 @@ def connect(path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(files("keiex").joinpath("schema.sql").read_text())
+    migrate(conn)
     return conn
+
+
+# Columns added after a database was first published: (table, column, type).
+ADDED_COLUMNS = [
+    ("extension", "theme_path", "TEXT"),
+    ("extension", "source_url", "TEXT"),
+]
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    for table, column, kind in ADDED_COLUMNS:
+        if column not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+    conn.commit()
 
 
 def get_kv(conn: sqlite3.Connection, key: str) -> str | None:

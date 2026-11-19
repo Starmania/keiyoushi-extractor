@@ -15,9 +15,8 @@ import tempfile
 from collections import defaultdict
 from importlib.resources import files
 from pathlib import Path
-from urllib.parse import urlsplit
 
-from keiex.git import Repo
+from keiex.origins.base import OriginAdapter
 
 log = logging.getLogger(__name__)
 
@@ -50,103 +49,18 @@ def build_file_folder(path: str) -> str | None:
     return None
 
 
-def pr_number_of(subject: str) -> int | None:
-    """Squash merges end with "(#123)"."""
-    s = subject.rstrip()
-    start = s.rfind("(#")
-    if not s.endswith(")") or start < 0:
-        return None
-    digits = s[start + 2:-1]
-    return int(digits) if digits.isdigit() else None
+class KeiyoushiOrigin(OriginAdapter):
+    METADATA_ROOTS = ("src", "lib-multisrc")
+    folder_of = staticmethod(folder_of)
+    metadata_file_folder = staticmethod(build_file_folder)
 
-
-def host_of(url: str) -> str | None:
-    return urlsplit(url).hostname or None
-
-
-class KeiyoushiOrigin:
-    def __init__(self, conn: sqlite3.Connection, origin: str, repo: Repo, work_dir: Path, sdk_properties: Path | None):
-        self.conn = conn
-        self.origin = origin
-        self.repo = repo
-        self.work_dir = work_dir
-        self.sdk_properties = sdk_properties
-        row = conn.execute("SELECT * FROM origin WHERE id = ?", (origin,)).fetchone()
-        self.anchor = row["anchor_sha"]
-        self.branch = row["default_branch"]
-
-    # ---- git history ----
-
-    def ingest_commits(self) -> str:
-        head = self.repo.rev_parse(f"origin/{self.branch}")
-        known = {r[0]: r[1] for r in self.conn.execute("SELECT sha, seq FROM git_commit WHERE origin = ?", (self.origin,))}
-        shas = self.repo.first_parent_commits(self.anchor, head)
-        new = [(seq, sha) for seq, sha in enumerate(shas) if sha not in known]
-        if not new:
-            return head
-        log.info("ingesting %d commits", len(new))
-        # One `git show` per chunk: header fields split by \x1f, commits by \x1e, then changed paths.
-        fmt = "%x1e%H%x1f%cI%x1f%an%x1f%s%x1f%b%x1f"
-        seq_of = dict((sha, seq) for seq, sha in new)
-        for i in range(0, len(new), 200):
-            chunk = [sha for _, sha in new[i:i + 200]]
-            out = self.repo.run("show", "--no-renames", "--first-parent", "--name-only", f"--format={fmt}", *chunk)
-            for record in out.split("\x1e")[1:]:
-                sha, date, author, subject, body, paths = record.split("\x1f")
-                self.conn.execute(
-                    "INSERT INTO git_commit VALUES (?,?,?,?,?,?,?,?)",
-                    (self.origin, sha, seq_of[sha], date, author, subject, body.strip() or None, pr_number_of(subject)),
-                )
-                folders = {f for p in paths.split("\n") if p and (f := folder_of(p))}
-                self.conn.executemany(
-                    "INSERT OR IGNORE INTO commit_folder VALUES (?,?,?)", [(self.origin, sha, f) for f in folders]
-                )
-        self.conn.commit()
-        return head
-
-    def ingest_build_file_timeline(self) -> None:
-        last_seq = self.conn.execute(
-            "SELECT max(seq) FROM folder_version WHERE origin = ?", (self.origin,)
-        ).fetchone()[0]
-        commits = self.conn.execute(
-            "SELECT sha, seq FROM git_commit WHERE origin = ? AND seq > ? ORDER BY seq",
-            (self.origin, -1 if last_seq is None else last_seq),
-        ).fetchall()
-        rows = []
-        for c in commits:
-            if c["seq"] == 0:
-                for path, blob in self.repo.tree_entries(c["sha"], "src", "lib-multisrc").items():
-                    if folder := build_file_folder(path):
-                        rows.append((self.origin, folder, c["sha"], 0, blob))
-                continue
-            out = self.repo.run("diff-tree", "-r", "--no-renames", "--no-commit-id", "-z", f"{c['sha']}^", c["sha"], "--", "src", "lib-multisrc")
-            fields = out.split("\0")
-            # -z raw format: ":<mode> <mode> <old> <new> <status>\0<path>\0"
-            for meta, path in zip(fields[0::2], fields[1::2]):
-                if not meta or not (folder := build_file_folder(path)):
-                    continue
-                new_blob, status = meta.split()[3], meta.split()[4]
-                rows.append((self.origin, folder, c["sha"], c["seq"], None if status == "D" else new_blob))
-        self.conn.executemany("INSERT OR REPLACE INTO folder_version VALUES (?,?,?,?,?)", rows)
-        self.conn.commit()
-        log.info("timeline: %d build-file versions added", len(rows))
+    @property
+    def sdk_properties(self) -> Path | None:
+        return self.options.get("sdk_properties")
 
     # ---- Gradle evaluation ----
 
-    def evaluate_pending_blobs(self) -> None:
-        pending = self.conn.execute(
-            """
-            SELECT v.path, v.blob, min(v.seq) AS seq, min(v.sha) AS sha FROM folder_version v
-            LEFT JOIN blob_metadata b ON b.blob = v.blob
-            WHERE v.origin = ? AND v.blob IS NOT NULL AND b.blob IS NULL
-            GROUP BY v.blob ORDER BY seq
-            """,
-            (self.origin,),
-        ).fetchall()
-        if not pending:
-            return
-        log.info("%d build files to evaluate", len(pending))
-
+    def evaluate(self, pending: list[sqlite3.Row]) -> None:
         # Layer k holds each folder's k-th pending version, so a batch never has a folder twice.
         layers: list[list[sqlite3.Row]] = []
         depth: dict[str, int] = defaultdict(int)
@@ -246,9 +160,7 @@ class KeiyoushiOrigin:
                 self._store(dump, {row["path"]: row["blob"]})
             else:
                 log.warning("cannot evaluate %s at %s", row["path"], row["sha"][:10])
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO blob_metadata VALUES (?, NULL, ?)", (row["blob"], out[-4000:])
-                )
+                self.store(row["blob"], None, out[-4000:])
                 self.conn.commit()
 
     def _run_gradle(self, tree: Path) -> tuple[bool, str, list[dict]]:
@@ -279,37 +191,35 @@ class KeiyoushiOrigin:
     def _store(self, dump: list[dict], wanted: dict[str, str]) -> None:
         by_path = {d["path"]: d for d in dump}
         for path, blob in wanted.items():
-            d = by_path.get(path)
-            self.conn.execute(
-                "INSERT OR REPLACE INTO blob_metadata VALUES (?,?,?)",
-                (blob, json.dumps(d) if d else None, None if d else "not configured by Gradle"),
-            )
+            self.store(blob, by_path.get(path), "not configured by Gradle")
         self.conn.commit()
 
     # ---- derived tables ----
 
-    def rebuild_derived(self) -> None:
-        o = self.origin
-        for table in ("extension", "source", "domain_usage"):
-            self.conn.execute(f"DELETE FROM {table} WHERE origin = ?", (o,))
+    def default_kind(self, path: str) -> str:
+        return "theme" if path.startswith("lib-multisrc/") else "src"
 
-        versions = self.conn.execute(
-            """
-            SELECT v.path, v.sha, v.seq, v.blob, b.json FROM folder_version v
-            LEFT JOIN blob_metadata b ON b.blob = v.blob
-            WHERE v.origin = ? ORDER BY v.path, v.seq
-            """,
-            (o,),
-        ).fetchall()
-        by_path: dict[str, list[sqlite3.Row]] = defaultdict(list)
-        for v in versions:
-            by_path[v["path"]].append(v)
+    def prepare_derive(self) -> None:
+        self._head_files = set(self.repo.tree_entries(f"origin/{self.branch}", "src", "lib-multisrc", "core/src/main/res"))
 
-        self._head = self.repo.rev_parse(f"origin/{self.branch}")
-        self._head_files = set(self.repo.tree_entries(self._head, "src", "lib-multisrc", "core/src/main/res"))
-        for path, history in by_path.items():
-            self._derive_folder(path, history)
-        self.conn.commit()
+    def folder_info(self, path: str, kind: str, meta: dict, removed_sha: str | None) -> dict:
+        parts = path.split("/")
+        if kind == "theme":
+            return {"lang": None, "module": parts[1], "source_url": self._tree_url(path, removed_sha)}
+        lang, module = parts[1], parts[2]
+        theme = meta.get("theme")
+        return {
+            "lang": lang,
+            "module": module,
+            "package_name": "eu.kanade.tachiyomi.extension." + (meta.get("pkgName") or f"{lang}.{module}"),
+            "theme_path": f"lib-multisrc/{theme}" if theme else None,
+            "icon_url": self._icon_url(path, theme, removed_sha),
+            "source_url": self._tree_url(path, removed_sha),
+        }
+
+    def _tree_url(self, path: str, removed_sha: str | None) -> str:
+        rev = self.repo.rev_parse(f"{removed_sha}^") if removed_sha else self.branch
+        return f"https://github.com/{self.origin}/tree/{rev}/{path}"
 
     def _icon_url(self, path: str, theme: str | None, removed_sha: str | None) -> str | None:
         """The extension's own launcher icon, else its theme's, else the default one (as the published index does).
@@ -327,70 +237,3 @@ class KeiyoushiOrigin:
             if icon in files:
                 return f"https://cdn.jsdelivr.net/gh/{self.origin}@{rev}/{icon}"
         return None
-
-    def _derive_folder(self, path: str, history: list[sqlite3.Row]) -> None:
-        o = self.origin
-        kind = "theme" if path.startswith("lib-multisrc/") else "src"
-        parts = path.split("/")
-        last = history[-1]
-        latest = next((json.loads(v["json"]) for v in reversed(history) if v["json"]), None)
-        meta = latest or {}
-        lang, module = (parts[1], parts[2]) if kind == "src" else (None, parts[1])
-        pkg = None
-        if kind == "src":
-            pkg = "eu.kanade.tachiyomi.extension." + (meta.get("pkgName") or f"{lang}.{module}")
-        self.conn.execute(
-            "INSERT INTO extension VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                o, path, kind, lang, module, meta.get("name") or module, pkg, meta.get("theme"),
-                meta.get("contentWarning"), meta.get("libVersion"),
-                meta.get("versionCode") if kind == "src" else meta.get("baseVersionCode"),
-                self._icon_url(path, meta.get("theme"), last["sha"] if last["blob"] is None else None) if kind == "src" else None,
-                history[0]["sha"], last["sha"], last["sha"] if last["blob"] is None else None,
-            ),
-        )
-        for s in meta.get("sources", []):
-            url = s["baseUrl"]
-            self.conn.execute(
-                "INSERT OR REPLACE INTO source VALUES (?,?,?,?,?,?,?,?)",
-                (o, path, str(s["id"]), s["name"], s["lang"], url["defaultUrl"], url["type"],
-                 json.dumps([m["url"] for m in url.get("mirrors", [])])),
-            )
-
-        # Open/close host ranges along the folder's history.
-        open_since: dict[tuple[str, str], str] = {}
-        for v in history:
-            hosts = self._hosts(json.loads(v["json"])) if v["json"] else (set() if v["blob"] is None else set(open_since))
-            for key in list(open_since):
-                if key not in hosts:
-                    self.conn.execute(
-                        "INSERT OR REPLACE INTO domain_usage VALUES (?,?,?,?,?,?)",
-                        (o, path, key[0], key[1], open_since.pop(key), v["sha"]),
-                    )
-            for key in hosts:
-                open_since.setdefault(key, v["sha"])
-        for (host, role), since in open_since.items():
-            self.conn.execute("INSERT OR REPLACE INTO domain_usage VALUES (?,?,?,?,?,NULL)", (o, path, host, role, since))
-
-    @staticmethod
-    def _hosts(meta: dict) -> set[tuple[str, str]]:
-        hosts = set()
-        for s in meta.get("sources", []):
-            url = s["baseUrl"]
-            if h := host_of(url["defaultUrl"]):
-                hosts.add((h, "base"))
-            for m in url.get("mirrors", []):
-                if (h := host_of(m["url"])) and (h, "base") not in hosts:
-                    hosts.add((h, "mirror"))
-        for d in meta.get("deeplinks", []):
-            for h in d["hosts"]:
-                if (h.lower(), "base") not in hosts and (h.lower(), "mirror") not in hosts:
-                    hosts.add((h.lower(), "deeplink"))
-        return hosts
-
-    def run(self) -> None:
-        self.repo.run("fetch", "--quiet", "origin", self.branch)
-        self.ingest_commits()
-        self.ingest_build_file_timeline()
-        self.evaluate_pending_blobs()
-        self.rebuild_derived()

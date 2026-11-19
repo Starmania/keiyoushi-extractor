@@ -41,10 +41,15 @@ jobs:
             gunzip data/linker.db.gz
           else
             echo "No previous database: this run does the full backfill."
-            uv run keiex add-origin
           fi
 
-      # ANDROID_HOME is preinstalled on ubuntu runners, so no --sdk-properties is needed.
+      # Idempotent: a repo added here gets its full backfill on the next refresh.
+      - name: Register origins
+        run: |
+          uv run keiex add-origin keiyoushi/extensions-source
+          uv run keiex add-origin manga-download/haruneko
+
+      # ANDROID_HOME (Gradle, keiyoushi) and node/npm (TypeScript, haruneko) are preinstalled on ubuntu runners.
       # Download counts go through Grafana's datasource API; without the secret, the public panel is used.
       - name: Refresh
         env:

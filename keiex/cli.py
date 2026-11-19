@@ -6,8 +6,19 @@ from keiex import db
 from keiex.git import Repo
 
 KEIYOUSHI = "keiyoushi/extensions-source"
-KEIYOUSHI_ANCHOR = "7363e4298c2a6cc4e32e6ef6af2d48611d5b619e"
-ADAPTERS = {"keiyoushi-gradle"}
+# Known repos: adapter, default branch, and the commit history starts at.
+PRESETS = {
+    KEIYOUSHI: ("keiyoushi-gradle", "main", "7363e4298c2a6cc4e32e6ef6af2d48611d5b619e"),
+    # The connectors moved to web/src/engine/websites in this commit.
+    "manga-download/haruneko": ("haruneko-ts", "master", "d16720e53f1f83f61f23200c81fb82d93599db9e"),
+}
+
+
+def adapters():
+    from keiex.origins.haruneko import HarunekoOrigin
+    from keiex.origins.keiyoushi import KeiyoushiOrigin
+
+    return {"keiyoushi-gradle": KeiyoushiOrigin, "haruneko-ts": HarunekoOrigin}
 
 
 def origin_repo(work: Path, origin: str) -> Repo:
@@ -20,8 +31,12 @@ def origin_repo(work: Path, origin: str) -> Repo:
 
 
 def cmd_add_origin(args, conn):
-    if args.kind not in ADAPTERS:
-        raise SystemExit(f"unknown adapter {args.kind}; known: {sorted(ADAPTERS)}")
+    kind, branch, anchor = PRESETS.get(args.origin, (None, None, None))
+    args.kind, args.branch, args.anchor = args.kind or kind, args.branch or branch, args.anchor or anchor
+    if not (args.kind and args.branch and args.anchor):
+        raise SystemExit(f"{args.origin} has no preset: pass --kind, --branch and --anchor")
+    if args.kind not in adapters():
+        raise SystemExit(f"unknown adapter {args.kind}; known: {sorted(adapters())}")
     origin_repo(args.work, args.origin)
     conn.execute(
         "INSERT OR REPLACE INTO origin VALUES (?,?,?,?,?)",
@@ -35,18 +50,21 @@ def origins(conn, only: str | None):
     return [r for r in rows if only in (None, r["id"])]
 
 
-def cmd_metadata(args, conn):
-    from keiex.origins.keiyoushi import KeiyoushiOrigin
+def adapter(args, conn, o):
+    return adapters()[o["kind"]](conn, o["id"], origin_repo(args.work, o["id"]), args.work,
+                                 sdk_properties=getattr(args, "sdk_properties", None))
 
+
+def cmd_metadata(args, conn):
     for o in origins(conn, args.origin):
-        KeiyoushiOrigin(conn, o["id"], origin_repo(args.work, o["id"]), args.work, args.sdk_properties).run()
+        adapter(args, conn, o).run()
 
 
 def cmd_github(args, conn):
     from keiex.github import ingest
 
     for o in origins(conn, args.origin):
-        ingest(conn, o["id"])
+        ingest(conn, o["id"], adapter(args, conn, o).folder_of)
 
 
 def cmd_link(args, conn):
@@ -80,9 +98,9 @@ def main():
 
     a = sub.add_parser("add-origin", help="register a repo to track")
     a.add_argument("origin", nargs="?", default=KEIYOUSHI)
-    a.add_argument("--kind", default="keiyoushi-gradle")
-    a.add_argument("--branch", default="main")
-    a.add_argument("--anchor", default=KEIYOUSHI_ANCHOR)
+    a.add_argument("--kind", help="adapter; preset for known repos")
+    a.add_argument("--branch", help="default branch; preset for known repos")
+    a.add_argument("--anchor", help="first commit of the tracked history; preset for known repos")
     a.set_defaults(fn=cmd_add_origin)
 
     gradle_args = argparse.ArgumentParser(add_help=False)

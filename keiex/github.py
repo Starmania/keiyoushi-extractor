@@ -7,7 +7,6 @@ import subprocess
 import httpx
 
 from keiex.db import get_kv, set_kv
-from keiex.origins.keiyoushi import folder_of
 
 log = logging.getLogger(__name__)
 
@@ -96,7 +95,7 @@ def same_repo_numbers(refs: dict, origin: str) -> list[int]:
     return [n["number"] for n in refs["nodes"] if n["repository"]["nameWithOwner"].lower() == origin.lower()]
 
 
-def ingest(conn: sqlite3.Connection, origin: str) -> None:
+def ingest(conn: sqlite3.Connection, origin: str, folder_of) -> None:
     gh = GitHub()
     owner, name = origin.split("/")
     anchor_date = conn.execute(

@@ -64,11 +64,13 @@ CREATE TABLE IF NOT EXISTS extension (
     module          TEXT NOT NULL,
     name            TEXT,
     package_name    TEXT,
-    theme           TEXT,                   -- theme folder name; "lib-multisrc/<theme>"
+    theme           TEXT,                   -- theme display name
+    theme_path      TEXT,                   -- theme folder, e.g. "lib-multisrc/<theme>"
     content_warning TEXT,
     lib_version     TEXT,
     version_code    INTEGER,
     icon_url        TEXT,
+    source_url      TEXT,                   -- where to browse the folder's code
     first_sha       TEXT,
     last_sha        TEXT,                   -- last commit that changed the build file
     removed_sha     TEXT,

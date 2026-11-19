@@ -1,5 +1,6 @@
 from keiex.linking import body_hosts, form_sections, name_candidates, normalize, title_names
-from keiex.origins.keiyoushi import build_file_folder, folder_of, pr_number_of
+from keiex.origins.base import pr_number_of
+from keiex.origins.keiyoushi import build_file_folder, folder_of
 
 FORM = """### Source information
 
@@ -56,3 +57,21 @@ def test_title_names():
     assert title_names("[Asura Scans] chapters fail") == (["Asura Scans"], [])
     assert title_names("Blue Solo: no images") == ([], ["Blue Solo"])
     assert title_names("(Mangabox) Mangakakalot: Website redesign") == (["Mangabox"], ["Mangakakalot"])
+
+
+def test_haruneko_folders():
+    from keiex.origins.haruneko import connector_file_folder, folder_of
+
+    root = "web/src/engine/websites"
+    assert folder_of(f"{root}/MangaTR.ts") == f"{root}/MangaTR"
+    assert folder_of(f"{root}/MangaTR.webp") == f"{root}/MangaTR"
+    assert folder_of(f"{root}/MangaTR_e2e.ts") == f"{root}/MangaTR"
+    assert folder_of(f"{root}/ComicFuz_proto.ts") == f"{root}/ComicFuz"
+    assert folder_of(f"{root}/Kagane.DRM.d.ts") == f"{root}/Kagane"
+    assert folder_of(f"{root}/templates/FlatManga.ts") == f"{root}/templates/FlatManga"
+    assert folder_of(f"{root}/_index.ts") is None
+    assert folder_of(f"{root}/legacy/Old.js") is None
+    assert connector_file_folder(f"{root}/MangaTR.ts") == f"{root}/MangaTR"
+    assert connector_file_folder(f"{root}/MangaTR_e2e.ts") is None
+    assert connector_file_folder(f"{root}/Kagane.DRM.d.ts") is None
+    assert connector_file_folder(f"{root}/decorators/Common.ts") == f"{root}/decorators/Common"
