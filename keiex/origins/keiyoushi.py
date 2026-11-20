@@ -6,6 +6,7 @@ Metadata depends only on a folder's build file, so each distinct build-file blob
 once, in batches, against the current build infrastructure.
 """
 
+import hashlib
 import json
 import logging
 import shutil
@@ -26,6 +27,8 @@ INFRA_PATHS = [
     "build.gradle.kts", "settings.gradle.kts", "gradle.properties", "gradlew",
 ]
 BATCH_SIZE = 250
+# Highest versionId tried when recognizing an auto-computed source id.
+MAX_VERSION_ID = 64
 GRADLE_FLAGS = ["-q", "help", "--no-configuration-cache", "-Dorg.gradle.configureondemand=false"]
 
 
@@ -37,6 +40,21 @@ def folder_of(path: str) -> str | None:
     if parts[0] == "lib-multisrc" and len(parts) >= 3:
         return "/".join(parts[:2])
     return None
+
+
+def source_id(name: str, lang: str, version_id: int = 1) -> int:
+    """computeSourceId in gradle/build-logic ExtensionPlugin.kt."""
+    digest = hashlib.md5(f"{name.lower()}/{lang}/{version_id}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
+def stable_source_id(source: dict) -> str:
+    """An auto-computed id with its versionId reset to 1, so a versionId bump keeps the same source; explicit ids as is."""
+    sid = int(source["id"])
+    for version_id in range(2, MAX_VERSION_ID + 1):
+        if source_id(source["name"], source["lang"], version_id) == sid:
+            return str(source_id(source["name"], source["lang"]))
+    return str(sid)
 
 
 def build_file_folder(path: str) -> str | None:
@@ -198,6 +216,9 @@ class KeiyoushiOrigin(OriginAdapter):
 
     def default_kind(self, path: str) -> str:
         return "theme" if path.startswith("lib-multisrc/") else "src"
+
+    def stable_id(self, source: dict) -> str:
+        return stable_source_id(source)
 
     def prepare_derive(self) -> None:
         self._head_files = set(self.repo.tree_entries(f"origin/{self.branch}", "src", "lib-multisrc", "core/src/main/res"))

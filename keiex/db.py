@@ -17,6 +17,7 @@ def connect(path: Path) -> sqlite3.Connection:
 ADDED_COLUMNS = [
     ("extension", "theme_path", "TEXT"),
     ("extension", "source_url", "TEXT"),
+    ("source", "stable_id", "TEXT"),
 ]
 
 

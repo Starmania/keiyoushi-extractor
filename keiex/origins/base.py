@@ -34,6 +34,17 @@ def host_of(url: str) -> str | None:
     return urlsplit(url).hostname or None
 
 
+def site_host(host: str) -> str | None:
+    """A host as compared across origins; None for addresses that aren't a site (127.0.0.1, localhost)."""
+    host = host.lower().rstrip(".")
+    if host == "localhost" or host.replace(".", "").isdigit() or ":" in host:
+        return None
+    for prefix in ("www.", "m."):
+        if host.startswith(prefix) and host.count(".") > 1:
+            return host.removeprefix(prefix)
+    return host
+
+
 class OriginAdapter:
     # Tree paths that hold metadata files, for ls-tree/diff-tree.
     METADATA_ROOTS: tuple[str, ...] = ()
@@ -70,6 +81,10 @@ class OriginAdapter:
 
     def prepare_derive(self) -> None:
         """Hook run once before the derived tables are rebuilt."""
+
+    def stable_id(self, source: dict) -> str:
+        """The id that stays the same for what the origin considers the same source."""
+        return str(source["id"])
 
     # ---- git history ----
 
@@ -152,7 +167,7 @@ class OriginAdapter:
 
     def rebuild_derived(self) -> None:
         o = self.origin
-        for table in ("extension", "source", "domain_usage"):
+        for table in ("extension", "source", "domain_usage", "source_host"):
             self.conn.execute(f"DELETE FROM {table} WHERE origin = ?", (o,))
         versions = self.conn.execute(
             """
@@ -191,10 +206,12 @@ class OriginAdapter:
         for s in meta.get("sources", []):
             url = s["baseUrl"]
             self.conn.execute(
-                "INSERT OR REPLACE INTO source VALUES (?,?,?,?,?,?,?,?)",
-                (o, path, str(s["id"]), s["name"], s["lang"], url["defaultUrl"], url["type"],
+                "INSERT OR REPLACE INTO source (origin, path, source_id, stable_id, name, lang, base_url, url_type, mirror_urls) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (o, path, str(s["id"]), self.stable_id(s), s["name"], s["lang"], url["defaultUrl"], url["type"],
                  json.dumps([m["url"] for m in url.get("mirrors", [])])),
             )
+        self._derive_source_hosts(path, history)
 
         # Open/close host ranges along the folder's history.
         open_since: dict[tuple[str, str], str] = {}
@@ -210,6 +227,36 @@ class OriginAdapter:
                 open_since.setdefault(key, v["sha"])
         for (host, role), since in open_since.items():
             self.conn.execute("INSERT OR REPLACE INTO domain_usage VALUES (?,?,?,?,?,NULL)", (o, path, host, role, since))
+
+    def _derive_source_hosts(self, path: str, history: list[sqlite3.Row]) -> None:
+        """Opens/closes (stable id, host) ranges along the folder's history, like domain_usage per folder."""
+        open_since: dict[tuple[str, str], str] = {}
+        names: dict[str, tuple[str, str | None]] = {}
+
+        def close(key, to_sha):
+            self.conn.execute(
+                "INSERT OR REPLACE INTO source_host VALUES (?,?,?,?,?,?,?,?)",
+                (self.origin, key[0], path, *names[key[0]], key[1], open_since.pop(key), to_sha),
+            )
+
+        for v in history:
+            if v["blob"] is not None and not v["json"]:
+                continue  # unevaluated version: keep what was declared before
+            current = set()
+            for s in json.loads(v["json"]).get("sources", []) if v["json"] else []:
+                sid = self.stable_id(s)
+                names[sid] = (s["name"], s.get("lang"))
+                url = s["baseUrl"]
+                for u in [url["defaultUrl"], *(m["url"] for m in url.get("mirrors", []))]:
+                    if (h := host_of(u)) and (h := site_host(h)):
+                        current.add((sid, h))
+            for key in list(open_since):
+                if key not in current:
+                    close(key, v["sha"])
+            for key in current:
+                open_since.setdefault(key, v["sha"])
+        for key in list(open_since):
+            close(key, None)
 
     def default_kind(self, path: str) -> str:
         return "src"

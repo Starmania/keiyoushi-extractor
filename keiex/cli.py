@@ -70,8 +70,11 @@ def cmd_github(args, conn):
 def cmd_link(args, conn):
     from keiex.linking import link_issues
 
+    from keiex.sitelinks import link_sources
+
     for o in origins(conn, args.origin):
         link_issues(conn, o["id"])
+    link_sources(conn)
 
 
 def cmd_stats(args, conn):
@@ -110,7 +113,7 @@ def main():
 
     sub.add_parser("metadata", parents=[gradle_args], help="git history + Gradle-evaluated metadata").set_defaults(fn=cmd_metadata)
     sub.add_parser("github", help="PRs and issues").set_defaults(fn=cmd_github)
-    sub.add_parser("link", help="recompute issue links").set_defaults(fn=cmd_link)
+    sub.add_parser("link", help="recompute issue links and cross-origin source links").set_defaults(fn=cmd_link)
     sub.add_parser("stats", parents=[stats_args], help="monitor status and download counts").set_defaults(fn=cmd_stats)
     sub.add_parser("all", parents=[gradle_args, stats_args], help="everything, in order").set_defaults(fn=cmd_all)
 

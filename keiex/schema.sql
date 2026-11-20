@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS source (
     origin      TEXT NOT NULL,
     path        TEXT NOT NULL,
     source_id   TEXT NOT NULL,              -- 64-bit id kept as text: JS cannot hold it as a number
+    stable_id   TEXT,                       -- see source_host
     name        TEXT NOT NULL,
     lang        TEXT NOT NULL,
     base_url    TEXT NOT NULL,
@@ -103,6 +104,34 @@ CREATE TABLE IF NOT EXISTS domain_usage (
     PRIMARY KEY (origin, path, host, role, from_sha)
 );
 CREATE INDEX IF NOT EXISTS domain_usage_host ON domain_usage(host);
+
+-- Base and mirror hosts per source, keyed by a stable id that survives what the origin treats as the same source
+-- (keiyoushi: a versionId bump). Hosts are normalized for matching across origins: lowercase, no "www."/"m.".
+CREATE TABLE IF NOT EXISTS source_host (
+    origin    TEXT NOT NULL,
+    stable_id TEXT NOT NULL,
+    path      TEXT NOT NULL,
+    name      TEXT NOT NULL,
+    lang      TEXT,
+    host      TEXT NOT NULL,
+    from_sha  TEXT NOT NULL,
+    to_sha    TEXT,                         -- NULL = still declared
+    PRIMARY KEY (origin, stable_id, host, from_sha)
+);
+CREATE INDEX IF NOT EXISTS source_host_host ON source_host(host);
+
+-- Sources of two origins that declared the same host at the same time: the same site. Rebuilt each run from
+-- source_host, so a link stays once its evidence is in the history, whatever either side declares later.
+CREATE TABLE IF NOT EXISTS source_link (
+    origin_a  TEXT NOT NULL,                -- origin_a < origin_b
+    stable_a  TEXT NOT NULL,
+    origin_b  TEXT NOT NULL,
+    stable_b  TEXT NOT NULL,
+    host      TEXT NOT NULL,                -- first shared host
+    since     TEXT NOT NULL,                -- when both started declaring it
+    PRIMARY KEY (origin_a, stable_a, origin_b, stable_b)
+);
+CREATE INDEX IF NOT EXISTS source_link_b ON source_link(origin_b, stable_b);
 
 CREATE TABLE IF NOT EXISTS pull_request (
     origin     TEXT NOT NULL,
