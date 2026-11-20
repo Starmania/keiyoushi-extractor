@@ -38,8 +38,25 @@ def monitor(conn: sqlite3.Connection, origin: str) -> None:
              ops = CASE WHEN excluded.ops = '[]' THEN ops ELSE excluded.ops END""",
         rows,
     )
+    fill_since(conn, origin)
     conn.commit()
     log.info("monitor: %d status rows (sweep %s)", len(rows), data["sweepDate"])
+
+
+def fill_since(conn: sqlite3.Connection, origin: str) -> None:
+    """Gives each extension's latest row a `since` when the monitor gave none: the first day of the current run of
+    that status in the history. Stored so the site doesn't walk the whole history on every request."""
+    conn.execute(
+        """UPDATE status_snapshot AS l SET since = (
+               SELECT min(s.date) FROM status_snapshot s
+               WHERE s.origin = l.origin AND s.path = l.path AND s.date > coalesce((
+                   SELECT max(o.date) FROM status_snapshot o
+                   WHERE o.origin = l.origin AND o.path = l.path AND o.date < l.date AND o.status != l.status
+               ), ''))
+           WHERE l.origin = ? AND l.since IS NULL
+             AND l.date = (SELECT max(m.date) FROM status_snapshot m WHERE m.origin = l.origin AND m.path = l.path)""",
+        (origin,),
+    )
 
 
 def downloads(conn: sqlite3.Connection, origin: str, collector_db: Path | None) -> None:
