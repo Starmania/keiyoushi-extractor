@@ -66,7 +66,8 @@ def downloads(conn: sqlite3.Connection, origin: str, collector_db: Path | None) 
     elif token := os.environ.get("GRAFANA_TOKEN"):
         rows, via = from_grafana_api(token), "Grafana API"
     else:
-        rows, via = from_grafana(conn, origin), "public Grafana panel"
+        # rows, via = _from_grafana(conn, origin), "public Grafana panel"
+        rows, via = {}, "no collector db or Grafana token"
     conn.executemany(
         "INSERT OR REPLACE INTO download_snapshot VALUES (?,?,?,?,?,?,?,?)",
         [(origin, path, today, *counts) for path, counts in rows.items()],
@@ -113,7 +114,7 @@ def from_grafana_api(token: str) -> dict[str, tuple]:
     return {f"src/{lang}/{module}": tuple(counts) for lang, module, *counts in zip(*columns)}
 
 
-def from_grafana(conn: sqlite3.Connection, origin: str) -> dict[str, tuple]:
+def _from_grafana(conn: sqlite3.Connection, origin: str) -> dict[str, tuple]:
     """Public panel fallback. It only exposes display name + language, so map those back to folders."""
     r = httpx.post(
         f"{GRAFANA}/api/public/dashboards/{GRAFANA_DASHBOARD}/panels/{GRAFANA_EXTENSIONS_PANEL}/query",
