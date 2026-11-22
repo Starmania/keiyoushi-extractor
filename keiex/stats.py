@@ -12,6 +12,7 @@ import httpx
 log = logging.getLogger(__name__)
 
 MONITOR_URL = "https://hazptr.github.io/keiyoushi-monitor/status.json"
+REPO_INDEX_URL = "https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.json"
 GRAFANA = "https://grafana.doesdev.fr"
 GRAFANA_DASHBOARD = "24677f7ec4ed4172b682f9d26c04037f"
 GRAFANA_EXTENSIONS_PANEL = 9
@@ -74,6 +75,22 @@ def fill_since(conn: sqlite3.Connection, origin: str) -> None:
              AND l.date = (SELECT max(m.date) FROM status_snapshot m WHERE m.origin = l.origin AND m.path = l.path)""",
         (origin,),
     )
+
+
+def apk_urls(conn: sqlite3.Connection, origin: str) -> None:
+    """The published APK of each package, so the site can offer installing it on a device. The repo branch keeps no
+    APKs any more; index.json points at the release asset."""
+    data = httpx.get(REPO_INDEX_URL, timeout=60, follow_redirects=True).raise_for_status().json()
+    today = datetime.now(UTC).date().isoformat()
+    rows = [
+        (origin, e["packageName"], url, today)
+        for e in data["extensionList"]["extensions"]
+        if (url := (e.get("resources") or {}).get("apkUrl"))
+    ]
+    with conn:
+        conn.execute("DELETE FROM extension_apk WHERE origin = ?", (origin,))
+        conn.executemany("INSERT INTO extension_apk VALUES (?,?,?,?)", rows)
+    log.info("apk urls: %d packages", len(rows))
 
 
 def downloads(conn: sqlite3.Connection, origin: str, collector_db: Path | None) -> None:

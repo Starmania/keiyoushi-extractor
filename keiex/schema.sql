@@ -200,6 +200,16 @@ CREATE TABLE IF NOT EXISTS status_snapshot (
     PRIMARY KEY (origin, path, date)
 );
 
+-- Where the published APK of each package is, from the repo's index.json. Its own table so the metadata step, which
+-- rewrites extension rows, doesn't clear it.
+CREATE TABLE IF NOT EXISTS extension_apk (
+    origin       TEXT NOT NULL,
+    package_name TEXT NOT NULL,
+    apk_url      TEXT NOT NULL,
+    date         TEXT NOT NULL,             -- UTC day it was read
+    PRIMARY KEY (origin, package_name)
+);
+
 CREATE TABLE IF NOT EXISTS download_snapshot (
     origin   TEXT NOT NULL,
     path     TEXT NOT NULL,

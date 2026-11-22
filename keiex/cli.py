@@ -81,6 +81,7 @@ def cmd_stats(args, conn):
     from keiex import stats
 
     stats.monitor(conn, KEIYOUSHI)
+    stats.apk_urls(conn, KEIYOUSHI)
     stats.downloads(conn, KEIYOUSHI, args.downloads_db)
 
 
