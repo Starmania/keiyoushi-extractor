@@ -22,20 +22,37 @@ HISTORY_CODES = {"p": "pass", "t": "partial", "x": "fail", "m": "maybe", "u": "u
 def monitor(conn: sqlite3.Connection, origin: str) -> None:
     data = httpx.get(MONITOR_URL, timeout=60).raise_for_status().json()
     rows = []
-    # History first, so today's detailed row (with ops) replaces its one-letter version.
+    # History first, so today's detailed row replaces its one-letter version. History rows leave notes and rechecks
+    # NULL, which also tells the upsert not to touch the detail fields of a row that already has them.
     runs = data["history"]["runs"]
     for ext_id, codes in data["history"]["ext"].items():
         for date, code in zip(runs, codes):
             if status := HISTORY_CODES.get(code):
-                rows.append((origin, f"src/{ext_id}", date, status, None, "[]"))
+                rows.append((origin, f"src/{ext_id}", date, status, None, "[]", None, None, None))
     for e in data["extensions"]:
         if e["status"] != "pending":
-            rows.append((origin, f"src/{e['id']}", data["sweepDate"], e["status"], e.get("since"), json.dumps(e.get("ops", []))))
+            rows.append(
+                (
+                    origin,
+                    f"src/{e['id']}",
+                    data["sweepDate"],
+                    e["status"],
+                    e.get("since"),
+                    json.dumps(e.get("ops", [])),
+                    e.get("error"),
+                    json.dumps(e.get("notes", [])),
+                    json.dumps(e.get("rechecks", [])),
+                )
+            )
     conn.executemany(
-        """INSERT INTO status_snapshot VALUES (?,?,?,?,?,?)
+        """INSERT INTO status_snapshot (origin, path, date, status, since, ops, error, notes, rechecks)
+           VALUES (?,?,?,?,?,?,?,?,?)
            ON CONFLICT DO UPDATE SET status = excluded.status,
              since = coalesce(excluded.since, since),
-             ops = CASE WHEN excluded.ops = '[]' THEN ops ELSE excluded.ops END""",
+             ops = CASE WHEN excluded.ops = '[]' THEN ops ELSE excluded.ops END,
+             error = CASE WHEN excluded.rechecks IS NULL THEN error ELSE excluded.error END,
+             notes = coalesce(excluded.notes, notes),
+             rechecks = coalesce(excluded.rechecks, rechecks)""",
         rows,
     )
     fill_since(conn, origin)

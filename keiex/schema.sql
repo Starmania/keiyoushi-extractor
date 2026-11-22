@@ -194,6 +194,9 @@ CREATE TABLE IF NOT EXISTS status_snapshot (
     status TEXT NOT NULL,
     since  TEXT,
     ops    TEXT NOT NULL DEFAULT '[]',
+    error    TEXT,                          -- the monitor's scrubbed error or fixed recheck sentence
+    notes    TEXT,                          -- JSON list of plain-language notes; NULL on history-only rows
+    rechecks TEXT,                          -- JSON list of proxy tries {from, status, ops, step?, tags?, ticked?}
     PRIMARY KEY (origin, path, date)
 );
 

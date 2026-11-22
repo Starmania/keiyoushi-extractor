@@ -18,6 +18,9 @@ ADDED_COLUMNS = [
     ("extension", "theme_path", "TEXT"),
     ("extension", "source_url", "TEXT"),
     ("source", "stable_id", "TEXT"),
+    ("status_snapshot", "error", "TEXT"),
+    ("status_snapshot", "notes", "TEXT"),
+    ("status_snapshot", "rechecks", "TEXT"),
 ]
 
 
